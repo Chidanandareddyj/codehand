@@ -1,0 +1,4 @@
+{"type":"step_start","timestamp":1,"sessionID":"ses_abc"}
+{"type":"tool_use","timestamp":2,"sessionID":"ses_abc","part":{"tool":"write","state":{"status":"completed","input":{"filePath":"src/a.ts"}}}}
+{"type":"text","timestamp":3,"sessionID":"ses_abc","part":{"text":"SUMMARY:\n- Updated the parser"}}
+{"type":"step_finish","timestamp":4,"sessionID":"ses_abc","part":{"tokens":{"input":20,"output":8},"cost":0.02}}

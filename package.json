@@ -1,0 +1,36 @@
+{
+  "name": "codehand",
+  "version": "0.1.0",
+  "description": "Hand coding tasks from an AI bot to OpenCode on the same computer.",
+  "type": "module",
+  "bin": {
+    "codehand": "dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "skill",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "commander": "^14.0.3",
+    "cross-spawn": "^7.0.6",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

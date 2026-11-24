@@ -1,0 +1,30 @@
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { log } from "./log.js";
+
+export function runnerCommand(jobId: string, turn: number): string[] {
+  if (process.env.CODEHAND_USE_TSX === "1") {
+    const require = createRequire(import.meta.url);
+    const tsx = require.resolve("tsx/cli");
+    const script = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+    return [process.execPath, tsx, script, "__run", jobId, String(turn)];
+  }
+  const script = fileURLToPath(new URL("../cli/main.js", import.meta.url));
+  return [process.execPath, script, "__run", jobId, String(turn)];
+}
+
+export function spawnDetachedRunner(jobId: string, turn: number): number | undefined {
+  const argv = runnerCommand(jobId, turn);
+  const command = argv[0];
+  if (!command) throw new Error("Runner command is empty.");
+  const child = spawn(command, argv.slice(1), {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: process.env,
+  });
+  child.unref();
+  log("info", `spawned runner pid=${child.pid ?? "unknown"} job=${jobId} turn=${turn}`);
+  return child.pid;
+}
