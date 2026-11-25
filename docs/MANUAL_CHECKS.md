@@ -5,7 +5,7 @@ Automated coverage is in `test/`. These are the cases from the plan that still n
 | Situation | Where it is covered |
 | --- | --- |
 | OpenCode is not installed | `refuses to start when OpenCode is missing` |
-| OpenCode is not signed in | `reports auth, rate limit, and permission failures` |
+| OpenCode is not signed in | Unsigned starts on the free tier (`auth: anonymous`). Paid-plan failures are in `reports auth, rate limit, and permission failures` |
 | OpenCode asks a question | `finishes an edit, then continues the same session` |
 | Rate limit | same test, with the fake |
 | A permission was rejected | same test |

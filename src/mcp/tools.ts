@@ -32,7 +32,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Coding agents",
       description:
-        "Check which coding agent is available on this computer and the user's saved preference. Call this first for any coding request bigger than a few lines.",
+        "Check which coding agent is available on this computer and the user's saved preference. Call this first for any coding request bigger than a few lines, and when the user says to use this connector for coding. If OpenCode is not installed, ask the user before installing. Login is optional: free models work with no account.",
       inputSchema: z.object({}),
     },
     async () => toolResult(respondAgents(await describeAgents())),
@@ -43,7 +43,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Set up OpenCode",
       description:
-        "Install OpenCode or sign it in. Returns a link and code for the user. Never ask the user to paste a subscription token into chat.",
+        "Install OpenCode or start an optional sign-in. Ask the user before action install. Sign-in is optional because OpenCode has a free tier with no account. Never ask the user to paste a subscription token into chat.",
       inputSchema: z.object({
         action: z.enum(["install", "login", "check", "api_key_help"]),
         method: z.enum(["chatgpt_device", "github_copilot", "api_key_env"]).optional(),
@@ -59,7 +59,7 @@ export function registerTools(server: McpServer): void {
             respondData(
               value,
               `OpenCode install: ${value.installed ? (value.version ?? "ok") : "not found after install"}.`,
-              "Call coding_agents to confirm, then login if needed.",
+              "Call coding_agents. Free models work with no login. Only offer login if the user wants a paid plan.",
             ),
           "Install failed. Show the error and offer to retry.",
         );
@@ -94,7 +94,11 @@ export function registerTools(server: McpServer): void {
           respondData(
             value,
             `OpenCode auth: ${value.auth}.`,
-            value.auth === "ready" ? "OpenCode is ready." : "Offer to log in.",
+            value.auth === "ready"
+              ? "OpenCode is signed in and ready."
+              : value.auth === "anonymous"
+                ? "OpenCode is ready on the free tier. No login needed. Offer login only if they want a paid plan."
+                : "Could not read saved logins. You can still try a free-tier task, or offer login.",
           ),
         "Could not check sign-in.",
       );

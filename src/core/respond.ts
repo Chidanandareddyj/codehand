@@ -26,16 +26,25 @@ function filesText(result: TaskResult): string {
 
 export function nextForAgents(agents: AgentDescription[], preference: Preference | null): string {
   const agent = agents[0];
-  if (!agent?.installed) return "Offer setup_coding_agent with action install.";
-  if (agent.auth !== "ready") return "Offer setup_coding_agent with action login.";
+  if (!agent?.installed) {
+    return "Ask the user first: OpenCode is not installed on this computer. Install it so I can hand coding work to it? Do not install until they say yes. If they say yes, call setup_coding_agent with action install.";
+  }
   if (!preference) {
-    const model = agent.models[0] ? ` Model example: ${agent.models[0]}.` : "";
-    return `Ask the user once: hand coding work to OpenCode, or do it yourself?${model} Then pass remember:true.`;
+    const free =
+      agent.auth !== "ready"
+        ? " Free models work with no account. Signing in is optional, for a paid plan."
+        : "";
+    return `Ask the user once: hand coding work to OpenCode, or do it yourself?${free} Then pass remember:true.`;
   }
   if (preference.delegate === "self")
     return "The user prefers you do the coding yourself. Don't start OpenCode.";
-  const model = preference.model ?? agent.models[0] ?? "OpenCode's default";
-  return `Preference saved: use OpenCode (model ${model}). Mention it to the user. Don't ask again.`;
+  const model =
+    preference.model ?? (agent.auth === "ready" ? "OpenCode's default" : (agent.models[0] ?? "opencode/big-pickle"));
+  const extra =
+    agent.auth === "ready"
+      ? ""
+      : " Using the free tier (no login). Offer setup_coding_agent login only if they want a paid plan.";
+  return `Preference saved: use OpenCode (model ${model}). Mention it to the user. Don't ask again.${extra}`;
 }
 
 export function respondAgents(data: {
@@ -131,8 +140,10 @@ export function respondTask(view: TaskView): Rendered<Record<string, unknown>> {
 function failureNext(summary: string, kind?: string): string {
   if (kind === "rate_limit")
     return "The provider rate-limited this run. Retry later, pick another model, or do the task yourself.";
-  if (kind === "auth") return "OpenCode is not signed in. Run setup_coding_agent with action login.";
-  if (kind === "not_installed") return "Install OpenCode with setup_coding_agent action install.";
+  if (kind === "auth")
+    return "The free tier was rejected or a provider needs a key. Ask if they want to sign in (setup_coding_agent login), or retry.";
+  if (kind === "not_installed")
+    return "Ask the user whether to install OpenCode. If they say yes, call setup_coding_agent with action install.";
   if (kind === "quota") return "The provider quota is used up. Try another model or do the task yourself.";
   return `The task failed. Tell the user: ${summary.slice(0, 200)}`;
 }

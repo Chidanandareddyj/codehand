@@ -44,7 +44,7 @@ export async function startLogin(
   const logFile = path.join(dir, `${loginId}.log`);
   const fd = fs.openSync(logFile, "a");
   const child = spawn(command.cmd, command.args, {
-    detached: true,
+    detached: process.platform !== "win32",
     stdio: ["ignore", fd, fd],
     windowsHide: true,
     env: buildChildEnv(),
@@ -80,7 +80,7 @@ export async function startLogin(
 }
 
 export async function checkLogin(): Promise<
-  Result<{ auth: "ready" | "needs_login" | "unknown"; providers: string[] }>
+  Result<{ auth: "ready" | "anonymous" | "unknown"; providers: string[] }>
 > {
   const { clearAdapterCache } = await import("../adapters/opencode.js");
   clearAdapterCache();

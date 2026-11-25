@@ -21,7 +21,11 @@ Checked against OpenCode 2.3.2 on this machine (23 Nov 2026). When the installed
 
 ## Product choices inside v1
 
-- Section 8 of the plan is still open. v1 does not open pull requests, does not pick a default model (omit `--model` and OpenCode uses its own), and is not published to npm.
+- OpenCode free models need no account (opencode.ai: "use the free models. No account needed."). If nothing is signed in, codehand starts anyway and passes `--model opencode/big-pickle`.
+- Installing OpenCode is never automatic. `coding_agents` tells the bot to ask the user first.
+- Pull requests are still out of v1. If a signed-in provider exists, `--model` is omitted so OpenCode picks. If not, the free model above is used.
+- The npm package name is unscoped `codehand` (confirmed free on the registry, 25 Nov 2026). The connector command is `npx -y codehand`.
+- On Windows, runners, OpenCode children, and login processes use `windowsHide: true` and do **not** set `detached: true`. Node treats detached Windows processes as a new console window.
 - Worktrees live in `~/codehand-work/wt/<task-id>`, not inside the user's repo.
 - `merge` commits any uncommitted worktree changes first, then `git merge --no-ff`. Otherwise the branch would still point at the base commit, because OpenCode is told not to commit.
 - An install that exceeds 45 seconds is stopped and reported as a timeout, instead of being left running in the background.

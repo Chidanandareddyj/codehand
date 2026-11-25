@@ -55,7 +55,12 @@ export async function runCli(argv = process.argv): Promise<void> {
         emitResult(
           await installAgent(),
           json,
-          (value) => respondData(value, `Installed: ${value.installed}`, "Check sign-in next."),
+          (value) =>
+            respondData(
+              value,
+              `Installed: ${value.installed}`,
+              "Free models work with no login. Offer login only if they want a paid plan.",
+            ),
           "Install failed.",
         );
         return;
@@ -89,7 +94,14 @@ export async function runCli(argv = process.argv): Promise<void> {
       emitResult(
         await checkLogin(),
         json,
-        (value) => respondData(value, `Auth: ${value.auth}`, "Continue when auth is ready."),
+        (value) =>
+          respondData(
+            value,
+            `Auth: ${value.auth}`,
+            value.auth === "anonymous"
+              ? "Ready on the free tier. Login is optional."
+              : "Continue when you want to start a task.",
+          ),
         "Could not check auth.",
       );
     });

@@ -13,6 +13,7 @@ const PROVIDER_ENVS = [
 ];
 
 const TESTED_MINOR = "2.3";
+export const FREE_MODEL = "opencode/big-pickle";
 
 interface CacheEntry<T> {
   at: number;
@@ -184,11 +185,20 @@ export const openCodeAdapter: AgentAdapter = {
       25_000,
     );
     if (listed.code !== 0 && !listed.stdout.trim()) {
-      const value = {
-        state: fromEnv.length ? ("ready" as const) : ("unknown" as const),
-        providers: fromEnv.map((name) => `${name} (env)`),
-        detail: (listed.stderr || "opencode auth list failed").slice(0, 300),
-      };
+      const value = fromEnv.length
+        ? {
+            state: "ready" as const,
+            providers: fromEnv.map((name) => `${name} (env)`),
+            detail: (listed.stderr || "opencode auth list failed").slice(0, 300),
+          }
+        : {
+            state: "anonymous" as const,
+            providers: ["opencode (free, no account)"],
+            detail: (listed.stderr || `No login saved. Free models such as ${FREE_MODEL} work without an account.`).slice(
+              0,
+              300,
+            ),
+          };
       authCache = { at: Date.now(), value };
       return value;
     }
@@ -206,19 +216,24 @@ export const openCodeAdapter: AgentAdapter = {
           .filter(Boolean);
       }
     } catch {
-      const value = {
-        state: fromEnv.length ? ("ready" as const) : ("unknown" as const),
-        providers: fromEnv,
-        detail: "opencode auth list did not return JSON.",
-      };
+      const value = fromEnv.length
+        ? { state: "ready" as const, providers: fromEnv, detail: "opencode auth list did not return JSON." }
+        : {
+            state: "anonymous" as const,
+            providers: ["opencode (free, no account)"],
+            detail: "opencode auth list did not return JSON. Free models still work with no account.",
+          };
       authCache = { at: Date.now(), value };
       return value;
     }
     const all = [...providers, ...fromEnv.map((name) => `${name} (env)`)];
-    const value = {
-      state: all.length ? ("ready" as const) : ("needs_login" as const),
-      providers: all,
-    };
+    const value = all.length
+      ? { state: "ready" as const, providers: all }
+      : {
+          state: "anonymous" as const,
+          providers: ["opencode (free, no account)"],
+          detail: `No login saved. Free models such as ${FREE_MODEL} work without an account.`,
+        };
     authCache = { at: Date.now(), value };
     return value;
   },
@@ -230,10 +245,11 @@ export const openCodeAdapter: AgentAdapter = {
     const models = listed.stdout
       .split(/\r?\n/)
       .map((line) => line.trim().split(/\s+/)[0] ?? "")
-      .filter((line) => line.includes("/"))
-      .slice(0, 15);
-    modelCache = { at: Date.now(), value: models };
-    return models;
+      .filter((line) => line.includes("/"));
+    if (!models.includes(FREE_MODEL)) models.unshift(FREE_MODEL);
+    const value = models.slice(0, 15);
+    modelCache = { at: Date.now(), value };
+    return value;
   },
 
   installCommand() {

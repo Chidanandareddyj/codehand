@@ -7,7 +7,7 @@ export interface AgentAdapter {
   displayName: string;
   detect(): Promise<{ installed: boolean; version?: string; path?: string; warning?: string }>;
   authStatus(): Promise<{
-    state: "ready" | "needs_login" | "unknown";
+    state: "ready" | "anonymous" | "unknown";
     providers: string[];
     detail?: string;
   }>;
