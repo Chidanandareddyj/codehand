@@ -7,9 +7,10 @@ export interface AgentDescription {
   name: string;
   installed: boolean;
   version?: string;
-  auth: "ready" | "needs_login" | "unknown" | "not_installed";
+  auth: "ready" | "anonymous" | "unknown" | "not_installed";
   providers: string[];
   models: string[];
+  freeTier: boolean;
   warning?: string;
 }
 
@@ -32,6 +33,7 @@ export async function describeAgents(): Promise<{
         auth: detected.installed ? auth.state : "not_installed",
         providers: detected.installed ? auth.providers : [],
         models: models.slice(0, 15),
+        freeTier: detected.installed && auth.state !== "unknown",
         warning: detected.warning,
       },
     ],

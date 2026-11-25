@@ -1,21 +1,49 @@
 {
   "name": "codehand",
   "version": "0.1.0",
-  "description": "Hand coding tasks from an AI bot to OpenCode on the same computer.",
+  "description": "Let an AI bot hand coding work to OpenCode on the same computer, via MCP or CLI.",
   "type": "module",
+  "license": "MIT",
+  "author": "Chidananda Reddy",
+  "main": "./dist/cli/main.js",
+  "exports": {
+    ".": "./dist/cli/main.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chidanandareddyj/codehand.git"
+  },
+  "homepage": "https://github.com/Chidanandareddyj/codehand#readme",
+  "bugs": {
+    "url": "https://github.com/Chidanandareddyj/codehand/issues"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "opencode",
+    "coding-agent",
+    "cli",
+    "grok",
+    "ai-bot"
+  ],
   "bin": {
     "codehand": "dist/cli/main.js"
   },
   "files": [
     "dist",
     "skill",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check ."

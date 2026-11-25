@@ -1,70 +1,97 @@
 # codehand
 
-codehand lets an AI bot hand a coding task to [OpenCode](https://opencode.ai) on the same computer, using the login already on that computer, instead of spending the bot's own tokens.
+Hand coding work from an AI bot to [OpenCode](https://opencode.ai) on the same computer, instead of spending the bot's tokens.
 
-It has two doors over one core:
+OpenCode's free models work with no account. Signing in is optional. Node 20+ is required on the computer the bot uses.
 
-- an MCP server, for bots that can add a connector from a command (Grok Bot, Cursor, Claude Code)
-- a CLI plus `skill/CODEHAND.md`, for bots that only have a terminal (Claude Duet, ChatGPT dots, Meta Muse)
+## Prompt to give your bot
 
-v1 talks to OpenCode only. It does not open pull requests, does not choose a model for you, and is not published yet.
+Copy one of these into chat with the bot that should do the coding.
 
-## Add it to a bot
+### Bots that can add a local MCP server
 
-From a built checkout:
-
-```text
-node dist/cli/main.js
-```
-
-Grok Bot: ask it to add an MCP server named codehand that runs that command. After this is published, the command becomes `npx -y codehand`.
-
-Cursor: add the same command under MCP servers.
-
-A terminal-only bot:
+Grok Bot, Cursor, Claude Code, Codex, and similar:
 
 ```text
-node dist/cli/main.js install-skill
+Add a local MCP server named codehand that runs exactly:
+
+npx -y codehand
+
+After it connects, use it for all coding work bigger than a few lines.
+
+- If OpenCode is not installed, ask me before installing it.
+- Use OpenCode's free models with no login unless I ask to sign in.
+- Remember that I want OpenCode for coding from now on.
+- Start each task on a separate git branch, check on it, and ask me before merge or discard.
 ```
 
-Then tell the bot to follow `CODEHAND.md` for coding tasks.
+That is the whole setup. The bot adds the connector, then asks you before it installs OpenCode.
 
-## What the bot does
+### Cursor config (optional)
 
-1. `coding_agents` shows whether OpenCode is installed and signed in, and whether you already chose to use it.
-2. The first time, the bot asks once: OpenCode, or do the work itself? It remembers the answer.
-3. `start_coding_task` runs OpenCode on a new branch in its own git worktree and returns a task id.
-4. `check_coding_task` waits up to 45 seconds. If OpenCode ends with `NEEDS_INPUT:`, the bot asks you and continues with `reply_to_coding_task`.
-5. `finish_coding_task` can keep the branch, commit, merge, or discard. Merge and discard wait for a confirmation.
+If you prefer to add it yourself, put this in `.cursor/mcp.json` (project) or your Cursor MCP settings:
 
-Sign-in goes through OpenCode's own login. codehand never reads or stores a subscription token. API keys can live in `~/.codehand/secrets.env` (`KEY=value`, mode 0600 where the OS allows it).
+```json
+{
+  "mcpServers": {
+    "codehand": {
+      "command": "npx",
+      "args": ["-y", "codehand"]
+    }
+  }
+}
+```
+
+Then send the same prompt as above, starting from "After it connects…".
+
+Claude Code:
+
+```text
+claude mcp add codehand -- npx -y codehand
+```
+
+### Terminal-only bots
+
+Claude Duet, ChatGPT dots, Meta Muse, and anything with a shell but no local MCP:
+
+```text
+Run `npx -y codehand install-skill` in this project, then follow CODEHAND.md for all coding work bigger than a few lines.
+
+- If OpenCode is not installed, ask me before installing it.
+- Use OpenCode's free models with no login unless I ask to sign in.
+- Remember that I want OpenCode for coding from now on.
+- Start each task on a separate git branch, check on it, and ask me before merge or discard.
+```
+
+## What the bot should do
+
+1. Call `coding_agents`.
+2. If OpenCode is missing, ask before `setup_coding_agent install`.
+3. Use the free tier when nobody is signed in. Offer login only for ChatGPT, Copilot, or an API key.
+4. Start a task on a separate git branch, check on it, and ask before merge or discard.
 
 ## Commands
 
 ```text
-codehand agents --json
-codehand setup install
-codehand setup login --method chatgpt_device
-codehand setup check
-codehand start --repo ./app --prompt "..." --json
-codehand check <task_id> --wait 30 --json
-codehand reply <task_id> "..." --json
-codehand output <task_id> --diff
-codehand finish <task_id> --merge --confirm
-codehand gc
-codehand install-skill
+npx -y codehand
+npx -y codehand agents --json
+npx -y codehand setup install
+npx -y codehand setup check
+npx -y codehand start --repo ./app --prompt "..." --json
 ```
 
 Running `codehand` with no arguments starts the MCP server.
 
-## Develop
+## Policy
 
-Node 20 or newer.
+Use your own OpenCode install, for your own use. codehand never reads or stores a subscription token. API keys, if you use them, go in the bot's secret store or in `~/.codehand/secrets.env`.
+
+## Develop
 
 ```text
 npm install
-npm test
 npm run build
+npm test
 ```
 
-Tests use a fake OpenCode, so they do not call a model. Notes on what was checked against the real CLI are in [docs/DECISIONS.md](docs/DECISIONS.md). The scenario list is in [docs/MANUAL_CHECKS.md](docs/MANUAL_CHECKS.md).
+Notes on the OpenCode flags this was built against are in [docs/DECISIONS.md](docs/DECISIONS.md).

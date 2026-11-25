@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJob } from "../../src/core/jobstore.js";
+import { describeAgents } from "../../src/core/agents.js";
 import { checkTask, replyTask, startTask } from "../../src/core/jobs.js";
 import { finishTask } from "../../src/core/finish.js";
 import { installSkill } from "../../src/core/skill.js";
@@ -78,10 +79,9 @@ describe("task lifecycle", () => {
   it("reports auth, rate limit, and permission failures", async () => {
     const dir = await repo();
     process.env.FAKE_OC_AUTH = "[]";
-    const unsigned = await startTask({ prompt: "edit", repo: dir, waitSeconds: 5 });
-    expect(unsigned.ok).toBe(false);
-    if (!unsigned.ok) expect(unsigned.error.kind).toBe("auth");
-
+    const unsigned = await describeAgents();
+    expect(unsigned.agents[0]?.auth).toBe("anonymous");
+    expect(unsigned.agents[0]?.freeTier).toBe(true);
     delete process.env.FAKE_OC_AUTH;
     process.env.FAKE_OC_SCENARIO = "error_rate";
     const limited = await startTask({ prompt: "edit", repo: dir, waitSeconds: 25 });

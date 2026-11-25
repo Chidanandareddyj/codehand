@@ -1,4 +1,4 @@
-import { openCodeAdapter } from "../adapters/opencode.js";
+import { FREE_MODEL, openCodeAdapter } from "../adapters/opencode.js";
 import { isJobId, newJobId, nowIso, runtimeLimits } from "./config.js";
 import {
   createJob,
@@ -153,12 +153,11 @@ async function waitFor(id: string, waitSeconds: number): Promise<TaskView> {
 async function ensureAgent(): Promise<CodehandError | null> {
   const detected = await openCodeAdapter.detect();
   if (!detected.installed) {
-    return { kind: "not_installed", message: "OpenCode is not installed." };
+    return {
+      kind: "not_installed",
+      message: "OpenCode is not installed. Ask the user before installing it.",
+    };
   }
-  const auth = await openCodeAdapter.authStatus();
-  if (auth.state === "needs_login") return { kind: "auth", message: "OpenCode is not signed in." };
-  if (auth.state === "unknown")
-    return { kind: "auth", message: auth.detail || "Could not check OpenCode sign-in." };
   return null;
 }
 
@@ -180,6 +179,9 @@ export async function startTask(input: StartInput): Promise<Result<StartOutcome>
   const agentError = await ensureAgent();
   if (agentError) return err(agentError.kind, agentError.message);
 
+  const auth = await openCodeAdapter.authStatus();
+  const model = input.model ?? (auth.state === "ready" ? undefined : FREE_MODEL);
+
   const repo = await resolveRepo(input.repo, input.baseBranch);
   if (!repo.ok) return repo;
   const id = newJobId();
@@ -189,7 +191,7 @@ export async function startTask(input: StartInput): Promise<Result<StartOutcome>
     id,
     agent: "opencode",
     mode: input.mode ?? "edit",
-    model: input.model,
+    model,
     promptPreview: input.prompt.trim().slice(0, 80),
     checks: input.checks,
     repo: repo.value,

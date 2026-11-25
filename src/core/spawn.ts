@@ -19,7 +19,7 @@ export function spawnDetachedRunner(jobId: string, turn: number): number | undef
   const command = argv[0];
   if (!command) throw new Error("Runner command is empty.");
   const child = spawn(command, argv.slice(1), {
-    detached: true,
+    detached: process.platform !== "win32",
     stdio: "ignore",
     windowsHide: true,
     env: process.env,
