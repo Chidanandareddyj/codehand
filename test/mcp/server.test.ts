@@ -5,7 +5,8 @@ import { InMemoryTransport, LATEST_PROTOCOL_VERSION } from "@modelcontextprotoco
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer } from "../../src/mcp/server.js";
 import { INSTRUCTIONS } from "../../src/mcp/instructions.js";
-import { isolate, stopJobs, useFake } from "../support.js";
+import { clearAdapterCache } from "../../src/adapters/opencode.js";
+import { initRepo, isolate, stopJobs, useFake } from "../support.js";
 
 const require = createRequire(import.meta.url);
 const tsx = require.resolve("tsx/cli");
@@ -61,12 +62,104 @@ describe("MCP server", () => {
     await client.send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
     const tools = await rpc(client, 2, "tools/list");
-    const names = ((tools.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map(
-      (tool) => tool.name,
-    );
+    const listed =
+      (
+        tools.result as
+          | {
+              tools?: {
+                name: string;
+                inputSchema?: { properties?: Record<string, unknown>; required?: string[] };
+                jsonSchema?: { properties?: Record<string, unknown>; required?: string[] };
+              }[];
+            }
+          | undefined
+      )?.tools ?? [];
+    const names = listed.map((tool) => tool.name);
     expect(names.sort()).toEqual([...TOOLS].sort());
+    const replyTool = listed.find((tool) => tool.name === "reply_to_coding_task");
+    const schema = replyTool?.inputSchema ?? replyTool?.jsonSchema;
+    expect(schema?.properties).toHaveProperty("model");
+    expect(schema?.required ?? []).not.toContain("model");
     await server.close();
   });
+
+  it("preserves large diff output", async () => {
+    const { work } = isolate();
+    initRepo(work);
+    useFake("large_diff");
+    const [client, transport] = InMemoryTransport.createLinkedPair();
+    const server = createServer();
+    await server.connect(transport);
+    await client.start();
+    await rpc(client, 1, "initialize", {
+      protocolVersion: LATEST_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "test", version: "0" },
+    });
+    await client.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const started = await rpc(client, 2, "tools/call", {
+      name: "start_coding_task",
+      arguments: { prompt: "large diff", repo: work, wait_seconds: 25 },
+    });
+    const data = (started.result as { structuredContent?: { data?: { task_id?: string } } })
+      .structuredContent;
+    const taskId = data?.data?.task_id;
+    const output = await rpc(client, 3, "tools/call", {
+      name: "get_coding_task_output",
+      arguments: { task_id: taskId, what: "diff" },
+    });
+    const result = output.result as { content?: { text?: string }[] };
+    expect(result.content?.[0]?.text?.length ?? 0).toBeGreaterThan(2000);
+    await server.close();
+  }, 40_000);
+
+  it("does not claim env-only authentication is signed in", async () => {
+    isolate();
+    useFake();
+    process.env.FAKE_OC_AUTH =
+      '[{"id":"parallel","name":"Parallel","connections":[{"type":"env","name":"PARALLEL_API_KEY"}]}]';
+    clearAdapterCache();
+    const [client, transport] = InMemoryTransport.createLinkedPair();
+    const server = createServer();
+    await server.connect(transport);
+    await client.start();
+    await rpc(client, 1, "initialize", {
+      protocolVersion: LATEST_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "test", version: "0" },
+    });
+    await client.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const setup = await rpc(client, 2, "tools/call", {
+      name: "setup_coding_agent",
+      arguments: { action: "check" },
+    });
+    const text = JSON.stringify(setup.result);
+    expect(text.toLowerCase()).not.toContain("signed in");
+    await server.close();
+  });
+
+  it("redacts credentials in repository URLs", async () => {
+    isolate();
+    useFake();
+    const [client, transport] = InMemoryTransport.createLinkedPair();
+    const server = createServer();
+    await server.connect(transport);
+    await client.start();
+    await rpc(client, 1, "initialize", {
+      protocolVersion: LATEST_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "test", version: "0" },
+    });
+    await client.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const result = await rpc(client, 2, "tools/call", {
+      name: "start_coding_task",
+      arguments: { prompt: "clone", repo: "https://user:secret@example.com/repo.git", waitSeconds: 25 },
+    });
+    expect(
+      JSON.stringify((result.result as { structuredContent?: unknown }).structuredContent),
+    ).not.toContain("user:secret");
+    await server.close();
+  }, 40_000);
 
   it("returns an envelope with next from coding_agents", async () => {
     isolate();

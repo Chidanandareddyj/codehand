@@ -3,6 +3,7 @@ import { z } from "zod";
 import { describeAgents } from "../core/agents.js";
 import { finishTask } from "../core/finish.js";
 import { checkTask, getOutput, replyTask, startTask } from "../core/jobs.js";
+import { redactDeep } from "../core/redact.js";
 import {
   respondAgents,
   respondData,
@@ -17,13 +18,24 @@ import type { Result } from "../core/types.js";
 function toolResult(rendered: Rendered<unknown>) {
   return {
     content: [{ type: "text" as const, text: rendered.text }],
-    structuredContent: rendered.envelope as unknown as Record<string, unknown>,
+    structuredContent: redactDeep(rendered.envelope) as unknown as Record<string, unknown>,
   };
 }
 
 function fromResult<T>(result: Result<T>, render: (value: T) => Rendered<unknown>, next: string) {
   if (!result.ok) return toolResult(respondError(result.error, next));
   return toolResult(render(result.value));
+}
+
+function setupCheckNext(auth: string): string {
+  if (auth === "ready") return "OpenCode is signed in and ready.";
+  if (auth === "env_only") {
+    return "Environment API key(s) detected. Free models are used by default unless you pick a model.";
+  }
+  if (auth === "anonymous") {
+    return "OpenCode is ready on the free tier. No login needed. Offer login only if they want a paid plan.";
+  }
+  return "Could not read saved logins. You can still try a free-tier task, or offer login.";
 }
 
 export function registerTools(server: McpServer): void {
@@ -90,16 +102,7 @@ export function registerTools(server: McpServer): void {
       const result = await checkLogin();
       return fromResult(
         result,
-        (value) =>
-          respondData(
-            value,
-            `OpenCode auth: ${value.auth}.`,
-            value.auth === "ready"
-              ? "OpenCode is signed in and ready."
-              : value.auth === "anonymous"
-                ? "OpenCode is ready on the free tier. No login needed. Offer login only if they want a paid plan."
-                : "Could not read saved logins. You can still try a free-tier task, or offer login.",
-          ),
+        (value) => respondData(value, `OpenCode auth: ${value.auth}.`, setupCheckNext(value.auth)),
         "Could not check sign-in.",
       );
     },
@@ -180,15 +183,21 @@ export function registerTools(server: McpServer): void {
     {
       title: "Reply to coding task",
       description:
-        "Send the user's answer or requested changes to an existing task. Continues the same OpenCode session and branch.",
+        "Send the user's answer or requested changes to an existing task. Continues a needs_input, done, or failed task that has a session. Optionally pass model to switch models on retry.",
       inputSchema: z.object({
         task_id: z.string(),
         message: z.string().min(1).max(20_000),
         wait_seconds: z.number().int().min(0).max(45).optional(),
+        model: z.string().optional(),
       }),
     },
-    async ({ task_id, message, wait_seconds }) => {
-      const result = await replyTask({ taskId: task_id, message, waitSeconds: wait_seconds });
+    async ({ task_id, message, wait_seconds, model }) => {
+      const result = await replyTask({
+        taskId: task_id,
+        message,
+        waitSeconds: wait_seconds,
+        model,
+      });
       return fromResult(result, (value) => respondTask(value), "Could not continue the task.");
     },
   );
@@ -223,6 +232,7 @@ export function registerTools(server: McpServer): void {
             value.nextOffset === null
               ? "That is the full output."
               : "Ask if the user wants the next page, then call again with the next offset.",
+            { unclipped: true },
           ),
         "Could not read that output.",
       );
@@ -244,19 +254,21 @@ export function registerTools(server: McpServer): void {
     },
     async ({ task_id, action, message, confirm }) => {
       const result = await finishTask({ taskId: task_id, action, message, confirm });
-      return fromResult(
-        result,
-        (value) =>
-          respondData(
-            value,
-            `${value.action} ${value.branch}${value.commit ? ` (${value.commit})` : ""}.`,
-            value.action === "merge" || value.action === "commit"
-              ? "Tell the user where the changes landed."
-              : "Tell the user what happened to the branch.",
-          ),
-        action === "merge" || action === "discard"
-          ? "Ask the user to confirm before merge or discard."
-          : "Could not finish the task.",
+      if (!result.ok) {
+        const next =
+          result.error.kind === "bad_input" && /confirm/i.test(result.error.message)
+            ? "Ask the user to confirm before merge or discard."
+            : "Could not finish the task. Show the error to the user.";
+        return toolResult(respondError(result.error, next));
+      }
+      return toolResult(
+        respondData(
+          result.value,
+          `${result.value.action} ${result.value.branch}${result.value.commit ? ` (${result.value.commit})` : ""}.`,
+          result.value.action === "merge" || result.value.action === "commit"
+            ? "Tell the user where the changes landed."
+            : "Tell the user what happened to the branch.",
+        ),
       );
     },
   );

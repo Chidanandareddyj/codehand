@@ -6,7 +6,7 @@ import { openCodeAdapter } from "../adapters/opencode.js";
 import { codehandHome, newJobId, secretsPath } from "./config.js";
 import { runCaptured } from "./proc.js";
 import { buildChildEnv } from "./secrets.js";
-import { err, ok, type Result } from "./types.js";
+import { type AuthState, err, ok, type Result } from "./types.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,6 +49,10 @@ export async function startLogin(
     windowsHide: true,
     env: buildChildEnv(),
   });
+  const spawnState: { error: Error | null } = { error: null };
+  child.on("error", (error) => {
+    spawnState.error = error;
+  });
   child.unref();
   fs.closeSync(fd);
 
@@ -56,12 +60,20 @@ export async function startLogin(
   let url = "";
   let code = "";
   while (Date.now() < deadline) {
+    if (spawnState.error) break;
     const text = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
     url = text.match(/https?:\/\/\S+/)?.[0]?.replace(/[),.]+$/, "") ?? url;
     code = text.match(/(?:code|Code)\s*[:：]\s*([A-Z0-9-]{4,})/)?.[1] ?? code;
     if (url && code) break;
     if (child.exitCode !== null && text.trim()) break;
     await sleep(400);
+  }
+  if (spawnState.error && !url && !code) {
+    const errno = (spawnState.error as NodeJS.ErrnoException).code;
+    if (errno === "ENOENT") {
+      return err("not_installed", "OpenCode could not be started. Is it installed and on PATH?");
+    }
+    return err("crashed", `Failed to start OpenCode login (${spawnState.error.message}).`);
   }
   fs.writeFileSync(
     path.join(dir, `${loginId}.json`),
@@ -80,12 +92,24 @@ export async function startLogin(
 }
 
 export async function checkLogin(): Promise<
-  Result<{ auth: "ready" | "anonymous" | "unknown"; providers: string[] }>
+  Result<{
+    auth: AuthState;
+    providers: string[];
+    signedInProviders: string[];
+    envProviders: string[];
+    detail?: string;
+  }>
 > {
   const { clearAdapterCache } = await import("../adapters/opencode.js");
   clearAdapterCache();
   const auth = await openCodeAdapter.authStatus();
-  return ok({ auth: auth.state, providers: auth.providers });
+  return ok({
+    auth: auth.state,
+    providers: auth.providers,
+    signedInProviders: auth.signedInProviders,
+    envProviders: auth.envProviders,
+    ...(auth.detail ? { detail: auth.detail } : {}),
+  });
 }
 
 export function apiKeyHelp(providerEnv?: string): { envName: string; secretsPath: string } {

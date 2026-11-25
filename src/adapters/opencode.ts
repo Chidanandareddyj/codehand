@@ -1,7 +1,15 @@
+import { getUnavailableModels } from "../core/agentstate.js";
 import { runCaptured } from "../core/proc.js";
+import { redact } from "../core/redact.js";
 import { buildChildEnv } from "../core/secrets.js";
 import type { ErrorKind, NormalizedEvent } from "../core/types.js";
-import type { AgentAdapter, LoginMethod } from "./types.js";
+import type {
+  AdapterAuthStatus,
+  AdapterFailure,
+  AdapterFailureInput,
+  AgentAdapter,
+  LoginMethod,
+} from "./types.js";
 
 const PROVIDER_ENVS = [
   "ANTHROPIC_API_KEY",
@@ -12,7 +20,7 @@ const PROVIDER_ENVS = [
   "OPENCODE_API_KEY",
 ];
 
-const TESTED_MINOR = "2.3";
+const TESTED_MINORS = ["2.3", "2.4"];
 export const FREE_MODEL = "opencode/big-pickle";
 
 interface CacheEntry<T> {
@@ -21,7 +29,7 @@ interface CacheEntry<T> {
 }
 
 let detectCache: CacheEntry<Awaited<ReturnType<AgentAdapter["detect"]>>> | null = null;
-let authCache: CacheEntry<Awaited<ReturnType<AgentAdapter["authStatus"]>>> | null = null;
+let authCache: CacheEntry<AdapterAuthStatus> | null = null;
 let modelCache: CacheEntry<string[]> | null = null;
 
 function cacheTtl(): number {
@@ -39,21 +47,87 @@ function bin(): { cmd: string; base: string[] } {
 
 function versionWarning(version: string | undefined): string | undefined {
   if (!version) return "OpenCode is installed, but its version could not be read.";
-  if (!version.startsWith(`${TESTED_MINOR}.`)) {
-    return `OpenCode ${version} is outside the tested ${TESTED_MINOR}.x range. It may still work.`;
+  if (!TESTED_MINORS.some((minor) => version.startsWith(`${minor}.`))) {
+    return `OpenCode ${version} is outside the tested 2.3.x–2.4.x range. It may still work.`;
   }
   return undefined;
 }
 
-export function classifyFailure(exitCode: number | null, stderrTail: string): ErrorKind {
-  const text = `${stderrTail}\nexit:${exitCode ?? ""}`.toLowerCase();
-  if (/401|unauthorized|not authenticated|no provider|missing api key|invalid api key/.test(text))
+/** Classify raw error or stderr text into a normalized ErrorKind. */
+export function classifyTextError(text: string): ErrorKind {
+  const lower = text.toLowerCase();
+  if (/provider\.free-limit|free[-_ ]limit|quota|insufficient|billing|usage limit/.test(lower)) {
+    return "quota";
+  }
+  if (
+    /model unavailable|model_unavailable|model not found|unknown model|invalid model|model is not available/.test(
+      lower,
+    )
+  ) {
+    return "model_unavailable";
+  }
+  if (/429|rate[-_ ]limit|too many requests/.test(lower)) {
+    return "rate_limit";
+  }
+  if (/401|403|unauthorized|not authenticated|no provider|missing api key|invalid api key/.test(lower)) {
     return "auth";
-  if (/429|rate limit/.test(text)) return "rate_limit";
-  if (/quota|insufficient|billing|usage limit/.test(text)) return "quota";
-  if (/enotfound|econnreset|etimedout|network|fetch failed/.test(text)) return "network";
-  if (/session not found/.test(text)) return "bad_input";
+  }
+  if (/enotfound|econnreset|etimedout|network|fetch failed|econnrefused/.test(lower)) {
+    return "network";
+  }
+  if (/session not found/.test(lower)) {
+    return "bad_input";
+  }
   return "unknown";
+}
+
+/** Classify a failed OpenCode run from error events, spawn/signal status, and stderr tail. */
+export function classifyFailure(input: AdapterFailureInput): AdapterFailure {
+  const lastError = input.errorEvents.at(-1);
+  if (lastError) {
+    const kind = lastError.kind;
+    return {
+      kind,
+      message: redact(lastError.message).trim().slice(-500) || "OpenCode error.",
+      isProviderError: kind === "quota" || kind === "rate_limit",
+    };
+  }
+  if (input.spawnErrorCode === "ENOENT") {
+    return {
+      kind: "not_installed",
+      message: "OpenCode could not be started. Is it installed and on PATH?",
+    };
+  }
+  if (input.spawnErrorCode) {
+    return {
+      kind: "crashed",
+      message: `Failed to start OpenCode (${input.spawnErrorCode}).`,
+    };
+  }
+  if (input.signal) {
+    return {
+      kind: "crashed",
+      message: `OpenCode was terminated by signal ${input.signal}.`,
+    };
+  }
+  const text = `${input.stderrTail}\nexit:${input.exitCode ?? ""}`;
+  const kind = classifyTextError(text);
+  const message =
+    redact(input.stderrTail).trim().slice(-500) ||
+    `OpenCode exited with code ${input.exitCode ?? "unknown"}.`;
+  return {
+    kind,
+    message,
+    isProviderError: kind === "quota" || kind === "rate_limit",
+  };
+}
+
+/** Return true if the given model (or default omitted model) is a free-tier model. */
+export function isFreeModel(model?: string): boolean {
+  if (!model) return true;
+  return (
+    model === FREE_MODEL || model.endsWith("-free") || model.endsWith(":free") || model.endsWith("/free")
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -67,17 +141,19 @@ function textOf(value: unknown): string {
 export function parseLine(line: string): NormalizedEvent[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
-  const permission = trimmed.match(/permission requested:\s*([^\s(]+)\s*(?:\(([^)]*)\))?/i);
-  if (permission) {
-    return [
-      {
-        t: "permission_rejected",
-        permission: permission[1] ?? "unknown",
-        detail: permission[2] ?? "",
-      },
-    ];
+  if (!trimmed.startsWith("{")) {
+    const permission = trimmed.match(/^permission requested:\s*([^\s(]+)\s*(?:\(([^)]*)\))?/i);
+    if (permission) {
+      return [
+        {
+          t: "permission_rejected",
+          permission: permission[1] ?? "unknown",
+          detail: permission[2] ?? "",
+        },
+      ];
+    }
+    return [];
   }
-  if (!trimmed.startsWith("{")) return [];
   let parsed: Record<string, unknown>;
   try {
     const value = JSON.parse(trimmed) as unknown;
@@ -106,7 +182,7 @@ export function parseLine(line: string): NormalizedEvent[] {
     });
   }
   if (type === "text") {
-    const text = textOf(part?.text ?? parsed.text).slice(0, 20_000);
+    const text = textOf(part?.text ?? parsed.text).slice(-20_000);
     if (text.trim()) events.push({ t: "text", text });
   }
   if (type === "tool_use" || type === "tool") {
@@ -127,9 +203,32 @@ export function parseLine(line: string): NormalizedEvent[] {
   if (type === "error") {
     const error = asRecord(parsed.error);
     const data = asRecord(error?.data);
-    const message =
-      textOf(data?.message ?? error?.message ?? error?.name ?? parsed.error) || "OpenCode error";
-    events.push({ t: "error", kind: classifyFailure(null, message), message: message.slice(0, 500) });
+    const errorType = textOf(error?.type ?? error?.code ?? error?.name);
+    const rawMessage = textOf(
+      data?.message ??
+        data?.error ??
+        error?.message ??
+        parsed.message ??
+        (typeof parsed.error === "string" ? parsed.error : ""),
+    );
+    let message = rawMessage.trim();
+    if (!message) {
+      if (errorType === "provider.free-limit") {
+        message = "Free tier quota limit reached (provider.free-limit).";
+      } else if (errorType) {
+        message = errorType;
+      } else {
+        message = "OpenCode error";
+      }
+    } else if (errorType && !message.toLowerCase().includes(errorType.toLowerCase())) {
+      message = `${message} (${errorType})`;
+    }
+    const classifySource = `${errorType} ${rawMessage} ${message}`.trim();
+    events.push({
+      t: "error",
+      kind: classifyTextError(classifySource),
+      message: message.slice(0, 500),
+    });
   }
   return events;
 }
@@ -143,6 +242,42 @@ function toolSummary(input: Record<string, unknown> | null): string {
   const file = textOf(input.filePath ?? input.file ?? input.path);
   const command = textOf(input.command ?? input.cmd);
   return file || command || "";
+}
+
+function buildAuthStatus(
+  signedInProviders: string[],
+  envProviders: string[],
+  diagnostic?: string,
+): AdapterAuthStatus {
+  const signedIn = [...new Set(signedInProviders)];
+  const envOnly = [...new Set(envProviders)];
+  if (signedIn.length > 0) {
+    return {
+      state: "ready",
+      providers: [...signedIn, ...envOnly.map((e) => `${e} (env)`)],
+      signedInProviders: signedIn,
+      envProviders: envOnly,
+      ...(diagnostic ? { detail: diagnostic.slice(0, 300) } : {}),
+    };
+  }
+  if (envOnly.length > 0) {
+    const baseDetail = `Environment API key(s) detected (${envOnly.join(", ")}), not a saved login. Free models such as ${FREE_MODEL} are used by default unless you pick a model.`;
+    return {
+      state: "env_only",
+      providers: envOnly.map((e) => `${e} (env)`),
+      signedInProviders: [],
+      envProviders: envOnly,
+      detail: diagnostic ? `${baseDetail} (${diagnostic.slice(0, 100)})` : baseDetail,
+    };
+  }
+  const baseDetail = `No login saved. Free models such as ${FREE_MODEL} work without an account.`;
+  return {
+    state: "anonymous",
+    providers: ["opencode (free, no account)"],
+    signedInProviders: [],
+    envProviders: [],
+    detail: diagnostic ? `${baseDetail} (${diagnostic.slice(0, 120)})` : baseDetail,
+  };
 }
 
 async function opencode(
@@ -185,71 +320,78 @@ export const openCodeAdapter: AgentAdapter = {
       25_000,
     );
     if (listed.code !== 0 && !listed.stdout.trim()) {
-      const value = fromEnv.length
-        ? {
-            state: "ready" as const,
-            providers: fromEnv.map((name) => `${name} (env)`),
-            detail: (listed.stderr || "opencode auth list failed").slice(0, 300),
-          }
-        : {
-            state: "anonymous" as const,
-            providers: ["opencode (free, no account)"],
-            detail: (listed.stderr || `No login saved. Free models such as ${FREE_MODEL} work without an account.`).slice(
-              0,
-              300,
-            ),
-          };
+      const value = buildAuthStatus([], fromEnv, listed.stderr.trim() || "opencode auth list failed");
       authCache = { at: Date.now(), value };
       return value;
     }
-    let providers: string[] = [];
+    const signedInProviders: string[] = [];
+    const envProviders: string[] = [...fromEnv];
     try {
       const parsed = JSON.parse(listed.stdout) as unknown;
-      if (Array.isArray(parsed)) {
-        providers = parsed
-          .map((entry) => {
-            const record = asRecord(entry);
-            const connections = record?.connections;
-            if (!record || !Array.isArray(connections) || connections.length === 0) return "";
-            return textOf(record.id || record.name);
-          })
-          .filter(Boolean);
+      if (!Array.isArray(parsed)) {
+        const value = buildAuthStatus([], fromEnv, "opencode auth list did not return a JSON array");
+        authCache = { at: Date.now(), value };
+        return value;
+      }
+      for (const entry of parsed) {
+        const record = asRecord(entry);
+        const connections = record?.connections;
+        if (!record || !Array.isArray(connections) || connections.length === 0) continue;
+        const providerId = textOf(record.id || record.name);
+        for (const rawConn of connections) {
+          const conn = asRecord(rawConn);
+          if (!conn) continue;
+          const connType = textOf(conn.type).toLowerCase();
+          if (connType === "env" || connType === "environment") {
+            const envName = textOf(conn.name) || providerId;
+            if (envName) envProviders.push(envName);
+          } else if (connType === "credential" || connType === "") {
+            if (providerId) signedInProviders.push(providerId);
+          } else {
+            if (providerId) signedInProviders.push(providerId);
+          }
+        }
       }
     } catch {
-      const value = fromEnv.length
-        ? { state: "ready" as const, providers: fromEnv, detail: "opencode auth list did not return JSON." }
-        : {
-            state: "anonymous" as const,
-            providers: ["opencode (free, no account)"],
-            detail: "opencode auth list did not return JSON. Free models still work with no account.",
-          };
+      const value = buildAuthStatus([], fromEnv, "opencode auth list did not return JSON");
       authCache = { at: Date.now(), value };
       return value;
     }
-    const all = [...providers, ...fromEnv.map((name) => `${name} (env)`)];
-    const value = all.length
-      ? { state: "ready" as const, providers: all }
-      : {
-          state: "anonymous" as const,
-          providers: ["opencode (free, no account)"],
-          detail: `No login saved. Free models such as ${FREE_MODEL} work without an account.`,
-        };
+    const value = buildAuthStatus(signedInProviders, envProviders);
     authCache = { at: Date.now(), value };
     return value;
   },
 
   async listModels() {
     const ttl = cacheTtl();
-    if (modelCache && Date.now() - modelCache.at < ttl) return modelCache.value;
-    const listed = await opencode(["models", "--standalone", "--log-level", "error"], 25_000);
-    const models = listed.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim().split(/\s+/)[0] ?? "")
-      .filter((line) => line.includes("/"));
-    if (!models.includes(FREE_MODEL)) models.unshift(FREE_MODEL);
-    const value = models.slice(0, 15);
-    modelCache = { at: Date.now(), value };
-    return value;
+    const unavailable = getUnavailableModels("opencode");
+    let rawModels: string[];
+    if (modelCache && Date.now() - modelCache.at < ttl) {
+      rawModels = modelCache.value;
+    } else {
+      const listed = await opencode(["models", "--standalone", "--log-level", "error"], 25_000);
+      const parsed: string[] = [];
+      const seen = new Set<string>();
+      for (const rawLine of listed.stdout.split(/\r?\n/)) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        const parts = trimmed.split(/\s+/);
+        const id = parts[0] ?? "";
+        if (!id.includes("/")) continue;
+        const rest = parts.slice(1).join(" ").toLowerCase();
+        if (/\b(unavailable|deprecated|disabled)\b/.test(rest)) continue;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        parsed.push(id);
+      }
+      rawModels = parsed;
+      modelCache = { at: Date.now(), value: rawModels };
+    }
+    const filtered = rawModels.filter((model) => !(model in unavailable));
+    if (!(FREE_MODEL in unavailable) && !filtered.includes(FREE_MODEL)) {
+      filtered.unshift(FREE_MODEL);
+    }
+    return filtered.slice(0, 15);
   },
 
   installCommand() {
@@ -311,6 +453,7 @@ export const openCodeAdapter: AgentAdapter = {
 
   parseLine,
   classifyFailure,
+  isFreeModel,
 };
 
 export function clearAdapterCache(): void {

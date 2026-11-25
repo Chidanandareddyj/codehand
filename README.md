@@ -1,6 +1,6 @@
 # codehand
 
-Hand coding work from an AI bot to [OpenCode](https://opencode.ai) on the same computer, instead of spending the bot's tokens.
+Hand coding work from an AI bot to [OpenCode](https://opencode.ai) on the same computer, instead of spending the bot's tokens. OpenCode 2.3.x and 2.4.x are supported.
 
 OpenCode's free models work with no account. Signing in is optional. Node 20+ is required on the computer the bot uses.
 
@@ -83,6 +83,28 @@ npx -y codehand start --repo ./app --prompt "..." --json
 ```
 
 Running `codehand` with no arguments starts the MCP server.
+
+## Troubleshooting
+
+### Free-tier quota reached (`provider.free-limit`)
+
+OpenCode's free tier has a rolling usage cap. codehand reports the real quota error in task status (and marks `freeTier` exhausted in `coding_agents` until it resets or a free run succeeds). Wait for quota reset, pick another model, or sign in via `setup_coding_agent login`. If files were already edited before the limit hit, codehand marks the task `done` with a warning and still runs checks.
+
+### Model unavailable
+
+Some models listed by `opencode models` may be temporarily unavailable. codehand reports `model_unavailable`, remembers unavailable models temporarily, and lets you retry/continue the same session with another model via `reply_to_coding_task`.
+
+### Why `git log` on the task branch looks empty
+
+OpenCode edits files in a separate git worktree (`~/codehand-work/wt/<task-id>`) and leaves committing to you. Changes stay uncommitted in the worktree until you run `finish_coding_task` with `commit` or `merge`.
+
+### Environment API keys vs signed-in accounts
+
+Having an environment API key (such as `PARALLEL_API_KEY` or `OPENAI_API_KEY`) does not count as being signed into OpenCode (`auth: "env_only"`). codehand defaults to OpenCode's free model (`opencode/big-pickle`) unless you explicitly choose a model or save a preferred model.
+
+### Continuing a failed task
+
+If a task failed mid-way and has an OpenCode session, you can continue or retry it on the same branch with `reply_to_coding_task` (optionally passing a different `model`).
 
 ## Policy
 

@@ -2,23 +2,32 @@ import fs from "node:fs";
 
 const args = process.argv.slice(2);
 const scenario = process.env.FAKE_OC_SCENARIO ?? "done";
+const version = process.env.FAKE_OC_VERSION ?? "2.4.1";
 
 if (process.env.FAKE_OC_RECORD) {
   fs.appendFileSync(process.env.FAKE_OC_RECORD, `${JSON.stringify(args)}\n`);
 }
 
 if (args.includes("--version")) {
-  process.stdout.write("opencode v2.3.2\n");
+  process.stdout.write(`opencode v${version}\n`);
   process.exit(0);
 }
 
 if (args[0] === "auth" && args[1] === "list") {
-  process.stdout.write(process.env.FAKE_OC_AUTH ?? '[{"id":"openai","name":"OpenAI","connections":[{"type":"credential","method":"oauth"}]}]\n');
+  process.stdout.write(
+    process.env.FAKE_OC_AUTH ??
+      '[{"id":"openai","name":"OpenAI","connections":[{"type":"credential","method":"oauth"}]}]\n',
+  );
   process.exit(0);
 }
 
 if (args[0] === "models") {
-  process.stdout.write("openai/gpt-test\nopenai/gpt-test-mini\n");
+  if (process.env.FAKE_OC_MODELS !== undefined) {
+    const custom = process.env.FAKE_OC_MODELS;
+    process.stdout.write(custom.endsWith("\n") ? custom : `${custom}\n`);
+  } else {
+    process.stdout.write("openai/gpt-test\nopenai/gpt-test-mini\n");
+  }
   process.exit(0);
 }
 
@@ -54,11 +63,17 @@ function trackStart() {
 }
 
 function finishDone(summary = "SUMMARY:\n- Added hello") {
-  fs.writeFileSync("hello.ts", "export function hello() {\n  return \"hello\";\n}\n");
+  fs.writeFileSync("hello.ts", 'export function hello() {\n  return "hello";\n}\n');
   emit("step_start");
   emit("tool_use", { part: { tool: "write", state: { status: "completed", input: { filePath: "hello.ts" } } } });
   emit("text", { part: { text: summary } });
   emit("step_finish", { part: { tokens: { input: 12, output: 6 }, cost: 0.01 } });
+}
+
+/** OpenCode 2.4.1 can report provider failures as JSON on stdout with an empty stderr. */
+function failOnStdout(error) {
+  emit("error", { error });
+  process.exitCode = 1;
 }
 
 const stop = trackStart();
@@ -77,6 +92,28 @@ try {
   } else if (scenario === "error_quota") {
     process.stderr.write("usage limit exceeded\n");
     process.exitCode = 1;
+  } else if (scenario === "error_quota_stdout") {
+    failOnStdout({ type: "provider.free-limit" });
+  } else if (scenario === "model_unavailable") {
+    failOnStdout({ type: "provider.model", message: "Model unavailable" });
+  } else if (scenario === "late_free_limit") {
+    const stamp = new Date().toISOString();
+    fs.writeFileSync("late.ts", `export const late = ${JSON.stringify(`edited at ${stamp}`)};\n`);
+    emit("step_start");
+    emit("tool_use", {
+      part: { tool: "write", state: { status: "completed", input: { filePath: "late.ts" } } },
+    });
+    emit("text", { part: { text: "Inspecting files..." } });
+    failOnStdout({ type: "provider.free-limit" });
+  } else if (scenario === "large_diff") {
+    const body = Array.from({ length: 90 }, (_, index) => `export const line${index + 1} = "value ${index + 1}";`);
+    fs.writeFileSync("large.ts", `${body.join("\n")}\n`);
+    emit("step_start");
+    emit("tool_use", {
+      part: { tool: "write", state: { status: "completed", input: { filePath: "large.ts" } } },
+    });
+    emit("text", { part: { text: "SUMMARY:\n- Added a large file" } });
+    emit("step_finish", { part: { tokens: { input: 30, output: 10 }, cost: 0.02 } });
   } else if (scenario === "hang") {
     emit("step_start");
     await new Promise(() => {

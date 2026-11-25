@@ -1,12 +1,17 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJob } from "../../src/core/jobstore.js";
+import { clearAdapterCache, FREE_MODEL } from "../../src/adapters/opencode.js";
 import { describeAgents } from "../../src/core/agents.js";
-import { checkTask, replyTask, startTask } from "../../src/core/jobs.js";
+import { nowIso, savePreference } from "../../src/core/config.js";
 import { finishTask } from "../../src/core/finish.js";
+import { checkTask, replyTask, startTask, type StartOutcome, type TaskView } from "../../src/core/jobs.js";
+import { createJob } from "../../src/core/jobstore.js";
+import { respondTask } from "../../src/core/respond.js";
+import { checkLogin } from "../../src/core/setup.js";
 import { installSkill } from "../../src/core/skill.js";
-import { nowIso } from "../../src/core/config.js";
+import type { Result } from "../../src/core/types.js";
 import { initRepo, isolate, stopJobs, useFake } from "../support.js";
 
 afterEach(() => {
@@ -16,6 +21,10 @@ afterEach(() => {
   delete process.env.CODEHAND_CRASH_MS;
   delete process.env.FAKE_OC_AUTH;
   delete process.env.FAKE_OC_CONCURRENCY_FILE;
+  delete process.env.FAKE_OC_MODELS;
+  delete process.env.FAKE_OC_SCENARIO;
+  delete process.env.FAKE_OC_SECRET;
+  delete process.env.FAKE_OC_VERSION;
 });
 
 async function repo(): Promise<string> {
@@ -27,6 +36,12 @@ async function repo(): Promise<string> {
   return dir;
 }
 
+function taskOf(result: Result<StartOutcome> | Result<TaskView>): TaskView {
+  if (!result.ok) throw new Error(`expected ok, got ${result.error.kind}: ${result.error.message}`);
+  if (result.value.kind !== "task") throw new Error("expected a task, got a preference");
+  return result.value;
+}
+
 describe("task lifecycle", () => {
   it("finishes an edit, then continues the same session", async () => {
     const dir = await repo();
@@ -35,6 +50,9 @@ describe("task lifecycle", () => {
     if (!started.ok || started.value.kind !== "task") throw new Error("expected a task");
     expect(started.value.job.status).toBe("done");
     expect(started.value.result?.filesChanged.some((file) => file.path === "hello.ts")).toBe(true);
+    expect(started.value.result?.worktreeState).toBe("uncommitted");
+    expect(started.value.result?.workdir).toBeTruthy();
+    expect(respondTask(started.value).text).toContain("uncommitted");
     expect(fs.existsSync(path.join(started.value.job.workdir, "hello.ts"))).toBe(true);
 
     process.env.FAKE_OC_SCENARIO = "needs_input";
@@ -61,6 +79,37 @@ describe("task lifecycle", () => {
     expect(recorded).toContain("ses_test");
     expect(recorded).toContain("--auto");
   }, 60_000);
+
+  it("retains successful check results when a late free limit arrives", async () => {
+    const dir = await repo();
+    process.env.FAKE_OC_SCENARIO = "late_free_limit";
+    clearAdapterCache();
+    const task = await startTask({
+      prompt: "edit and check",
+      repo: dir,
+      checks: ["node -e \"console.log('ok')\""],
+      waitSeconds: 25,
+    });
+    expect(task.ok).toBe(true);
+    if (task.ok && task.value.kind === "task") {
+      expect(task.value.job.status).toBe("done");
+      expect(task.value.result?.warning).toBeTruthy();
+      expect(task.value.result?.checks?.[0]?.ok).toBe(true);
+      expect(task.value.result?.summary).not.toBe("Inspecting files...");
+    }
+  }, 40_000);
+
+  it("does not reuse previous turn files when a retry fails", async () => {
+    const dir = await repo();
+    const first = await startTask({ prompt: "edit", repo: dir, waitSeconds: 25 });
+    if (!first.ok || first.value.kind !== "task") throw new Error("start failed");
+    expect(first.value.job.status).toBe("done");
+    process.env.FAKE_OC_SCENARIO = "error_quota_stdout";
+    clearAdapterCache();
+    const next = await replyTask({ taskId: first.value.job.id, message: "try again", waitSeconds: 25 });
+    expect(next.ok).toBe(true);
+    if (next.ok && next.value.kind === "task") expect(next.value.job.status).toBe("failed");
+  }, 50_000);
 
   it("uses plan mode without auto-approve", async () => {
     const dir = await repo();
@@ -98,6 +147,132 @@ describe("task lifecycle", () => {
       expect(blocked.value.result?.blockedActions.some((item) => item.includes("bash"))).toBe(true);
     }
   }, 60_000);
+
+  it("classifies quota errors from stdout and exposes free tier exhaustion", async () => {
+    const dir = await repo();
+    process.env.FAKE_OC_SCENARIO = "error_quota_stdout";
+    clearAdapterCache();
+    const failed = await startTask({ prompt: "edit", repo: dir, waitSeconds: 25 });
+    expect(failed.ok).toBe(true);
+    if (!failed.ok || failed.value.kind !== "task") return;
+    expect(failed.value.job.status).toBe("failed");
+    expect(failed.value.job.error?.kind).toBe("quota");
+    expect(failed.value.job.error?.message.toLowerCase()).toMatch(/free|quota/);
+    expect(respondTask(failed.value).envelope.next.toLowerCase()).toMatch(/quota|free/);
+    const agent = (await describeAgents()).agents[0];
+    expect(agent?.freeTier).toBe(false);
+    expect(agent?.freeTierStatus).toBe("exhausted");
+    process.env.FAKE_OC_SCENARIO = "done";
+    clearAdapterCache();
+    await startTask({ prompt: "edit", repo: dir, model: FREE_MODEL, waitSeconds: 25 });
+    const recovered = (await describeAgents()).agents[0];
+    expect(recovered?.freeTier).toBe(true);
+    expect(recovered?.freeTierStatus).toBe("available");
+  }, 60_000);
+
+  it("continues a failed session and rejects replies after discard", async () => {
+    const dir = await repo();
+    process.env.FAKE_OC_SCENARIO = "error_quota_stdout";
+    clearAdapterCache();
+    const failed = await startTask({ prompt: "edit", repo: dir, waitSeconds: 25 });
+    if (!failed.ok || failed.value.kind !== "task") throw new Error("expected failed task");
+    expect(failed.value.job.status).toBe("failed");
+    expect(failed.value.job.sessionId).toBeTruthy();
+    process.env.FAKE_OC_SCENARIO = "done";
+    clearAdapterCache();
+    const continued = await replyTask({
+      taskId: failed.value.job.id,
+      message: "continue",
+      model: "openai/gpt-test",
+      waitSeconds: 25,
+    });
+    expect(continued.ok).toBe(true);
+    expect(fs.readFileSync(process.env.FAKE_OC_RECORD ?? "", "utf8")).toContain("--session");
+    const discarded = await finishTask({ taskId: failed.value.job.id, action: "discard", confirm: true });
+    expect(discarded.ok).toBe(true);
+    const replyAfter = await replyTask({ taskId: failed.value.job.id, message: "again" });
+    expect(replyAfter.ok).toBe(false);
+    if (!replyAfter.ok) expect(replyAfter.error.kind).toBe("bad_input");
+  }, 60_000);
+
+  it("keeps unavailable models out of available models", async () => {
+    const dir = await repo();
+    process.env.FAKE_OC_SCENARIO = "model_unavailable";
+    clearAdapterCache();
+    const failed = await startTask({ prompt: "edit", repo: dir, model: "openai/gpt-test", waitSeconds: 25 });
+    expect(failed.ok).toBe(true);
+    if (failed.ok && failed.value.kind === "task")
+      expect(failed.value.job.error?.kind).toBe("model_unavailable");
+    process.env.FAKE_OC_MODELS = "openai/gpt-test,openai/gpt-test-mini";
+    clearAdapterCache();
+    const agent = (await describeAgents()).agents[0];
+    expect(agent?.models).not.toContain("openai/gpt-test");
+    expect(agent?.unavailableModels).toContain("openai/gpt-test");
+  });
+
+  it("uses free defaults for environment-only auth and saved preferences", async () => {
+    const dir = await repo();
+    process.env.FAKE_OC_AUTH =
+      '[{"id":"parallel","name":"Parallel","connections":[{"type":"env","name":"PARALLEL_API_KEY"}]}]';
+    clearAdapterCache();
+    expect((await describeAgents()).agents[0]?.auth).toBe("env_only");
+    const login = await checkLogin();
+    expect(login.ok && login.value.auth).toBe("env_only");
+    await startTask({ prompt: "free", repo: dir, waitSeconds: 25 });
+    const firstArgs = fs
+      .readFileSync(process.env.FAKE_OC_RECORD ?? "", "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as string[]);
+    const firstRun = firstArgs.find((args) => args[0] === "run") ?? [];
+    expect(firstRun.slice(firstRun.indexOf("--model"), firstRun.indexOf("--model") + 2)).toEqual([
+      "--model",
+      FREE_MODEL,
+    ]);
+    await savePreference({ delegate: "opencode", model: "openai/gpt-test-mini", savedAt: nowIso() });
+    await startTask({ prompt: "preferred", repo: dir, waitSeconds: 25 });
+    expect(fs.readFileSync(process.env.FAKE_OC_RECORD ?? "", "utf8")).toContain("openai/gpt-test-mini");
+  }, 60_000);
+
+  it("warns for unsupported OpenCode versions", async () => {
+    await repo();
+    process.env.FAKE_OC_VERSION = "2.4.1";
+    clearAdapterCache();
+    expect((await describeAgents()).agents[0]?.warning).toBeFalsy();
+    process.env.FAKE_OC_VERSION = "2.5.0";
+    clearAdapterCache();
+    const warning = (await describeAgents()).agents[0]?.warning ?? "";
+    expect(warning).toMatch(/2\.3\.x.+2\.4\.x/);
+  });
+
+  it("cancels a queued task without reporting it as working", async () => {
+    const dir = await repo();
+    process.env.CODEHAND_MAX_RUNNING = "1";
+    process.env.FAKE_OC_SCENARIO = "hang";
+    const first = taskOf(await startTask({ prompt: "first", repo: dir, waitSeconds: 0 }));
+    const second = taskOf(await startTask({ prompt: "second", repo: dir, waitSeconds: 0 }));
+    const cancelled = await finishTask({ taskId: second.job.id, action: "cancel" });
+    expect(cancelled.ok).toBe(true);
+    const viewed = await checkTask({ taskId: second.job.id, waitSeconds: 0 });
+    expect(viewed.ok).toBe(true);
+    if (viewed.ok && viewed.value.kind === "task") {
+      expect(viewed.value.job.status).toBe("cancelled");
+      expect(respondTask(viewed.value).text).not.toContain("Still working");
+    }
+    await finishTask({ taskId: first.job.id, action: "cancel" });
+  }, 40_000);
+
+  it("rejects merging when the base branch changed", async () => {
+    const dir = await repo();
+    const task = taskOf(await startTask({ prompt: "edit", repo: dir, waitSeconds: 25 }));
+    execFileSync("git", ["checkout", "-b", "other"], { cwd: dir });
+    const result = await finishTask({ taskId: task.job.id, action: "merge", confirm: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("git");
+      expect(result.error.message).toContain(task.job.repo.baseBranch);
+    }
+  }, 40_000);
 
   it("cancels a hung run and times out an idle one", async () => {
     const dir = await repo();

@@ -20,6 +20,12 @@ async function git(args: string[], cwd?: string, timeoutMs = 60_000): Promise<Re
   return ok(result.stdout);
 }
 
+function urlDirName(input: string): string {
+  const name = path.basename(input).replace(/\.git$/, "") || "repo";
+  const hash8 = createHash("sha1").update(input).digest("hex").slice(0, 8);
+  return `${name}-${hash8}`;
+}
+
 export async function resolveRepo(
   input: string,
   baseBranch?: string,
@@ -27,9 +33,17 @@ export async function resolveRepo(
   const isUrl = /^(git@|https?:\/\/|ssh:\/\/)/.test(input) || input.endsWith(".git");
   let root: string;
   if (isUrl) {
-    const name = path.basename(input).replace(/\.git$/, "") || "repo";
-    root = path.join(workRoot(), name);
-    if (!fs.existsSync(path.join(root, ".git"))) {
+    root = path.join(workRoot(), urlDirName(input));
+    const gitDir = path.join(root, ".git");
+    if (fs.existsSync(gitDir)) {
+      const hasHead = await git(["rev-parse", "HEAD"], root);
+      if (hasHead.ok) {
+        await git(["fetch", "--all", "--prune"], root);
+      } else {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+    if (!fs.existsSync(gitDir)) {
       fs.mkdirSync(workRoot(), { recursive: true });
       const cloned = await git(["clone", "--", input, root], undefined, 40_000);
       if (!cloned.ok) return cloned;
@@ -146,7 +160,26 @@ export async function commitWorktree(workdir: string, message: string): Promise<
   return ok(rev.ok ? rev.value.trim() : "committed");
 }
 
-export async function mergeBranch(root: string, branch: string, message: string): Promise<Result<string>> {
+export async function mergeBranch(
+  root: string,
+  branch: string,
+  message: string,
+  baseBranch?: string,
+): Promise<Result<string>> {
+  if (baseBranch) {
+    const head = await git(["rev-parse", "--abbrev-ref", "HEAD"], root);
+    if (!head.ok) return head;
+    const current = head.value.trim();
+    if (current !== baseBranch) {
+      return err(
+        "git",
+        `Base repo is on '${current}' instead of '${baseBranch}'. Switch to '${baseBranch}' before merging.`,
+      );
+    }
+  }
+  if (await hasChanges(root)) {
+    return err("git", "Base repository has uncommitted changes. Commit or stash them before merging.");
+  }
   const merged = await git(["merge", "--no-ff", "-m", message, branch], root);
   if (merged.ok) return ok(merged.value.trim() || "merged");
   if (/conflict/i.test(merged.error.message)) {
@@ -159,13 +192,25 @@ export async function mergeBranch(root: string, branch: string, message: string)
 export async function removeWorktree(root: string, workdir: string, branch: string): Promise<Result<string>> {
   if (fs.existsSync(workdir)) {
     const removed = await git(["worktree", "remove", "--force", workdir], root);
-    if (!removed.ok) return removed;
+    if (!removed.ok) {
+      try {
+        fs.rmSync(workdir, { recursive: true, force: true });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return err("git", removed.error.message || detail);
+      }
+      await git(["worktree", "prune"], root);
+      if (fs.existsSync(workdir)) return removed;
+    }
   }
-  await git(["branch", "-D", branch], root);
+  const deleted = await git(["branch", "-D", branch], root);
+  if (!deleted.ok && !/not found/i.test(deleted.error.message)) return deleted;
   return ok("removed");
 }
 
 export async function withRepoLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
-  const hash = createHash("sha1").update(root).digest("hex").slice(0, 12);
+  let key = path.resolve(root);
+  if (process.platform === "win32") key = key.toLowerCase();
+  const hash = createHash("sha1").update(key).digest("hex").slice(0, 12);
   return withFileLock(path.join(codehandHome(), "locks", `repo-${hash}.lock`), fn);
 }

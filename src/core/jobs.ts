@@ -1,5 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
 import { FREE_MODEL, openCodeAdapter } from "../adapters/opencode.js";
-import { isJobId, newJobId, nowIso, runtimeLimits } from "./config.js";
+import { isJobId, jobDir, newJobId, nowIso, runtimeLimits } from "./config.js";
 import {
   createJob,
   listJobs,
@@ -7,12 +9,16 @@ import {
   readJob,
   readResult,
   updateJob,
+  writeResult,
   writeUserPrompt,
 } from "./jobstore.js";
 import { isAlive } from "./proc.js";
 import { getPreference, savePreference } from "./prefs.js";
-import { recentLines } from "./summarize.js";
+import { redact } from "./redact.js";
+import { readSecrets } from "./secrets.js";
 import { spawnDetachedRunner } from "./spawn.js";
+import { atomicWriteText } from "./store.js";
+import { recentLines } from "./summarize.js";
 import {
   err,
   isTerminal,
@@ -24,7 +30,7 @@ import {
   type Result,
   type TaskResult,
 } from "./types.js";
-import { createWorktree, resolveRepo, worktreePath } from "./workspace.js";
+import { computeDiff, createWorktree, resolveRepo, withRepoLock, worktreePath } from "./workspace.js";
 
 export interface StartInput {
   prompt: string;
@@ -34,7 +40,7 @@ export interface StartInput {
   baseBranch?: string;
   checks?: string[];
   remember?: boolean;
-  delegate?: "opencode" | "self";
+  delegate?: string;
   waitSeconds?: number;
 }
 
@@ -87,13 +93,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function writeTerminalResult(job: Job, status: "failed" | "cancelled", summary: string): void {
+  if (readResult(job.id)) return;
+  writeResult(job.id, {
+    status,
+    summary,
+    filesChanged: [],
+    blockedActions: [],
+    durationS: 0,
+    branch: job.branch,
+  });
+}
+
 export async function reconcile(id: string): Promise<Job | null> {
   const job = readJob(id);
   if (job?.status !== "running") return job;
+  const crashMs = runtimeLimits().crashMs;
   const beat = job.heartbeatAt ? Date.parse(job.heartbeatAt) : 0;
-  const stale = Date.now() - beat > runtimeLimits().crashMs;
-  if (!stale || isAlive(job.pid)) return job;
-  return updateJob(id, (current) => {
+  const age = Date.now() - beat;
+  const stale = age > crashMs;
+  const hung = age > crashMs * 5;
+  if (!stale) return job;
+  if (isAlive(job.pid) && !hung) return job;
+  const updated = await updateJob(id, (current) => {
     if (current.status !== "running") return current;
     const endedAt = nowIso();
     if (current.cancelRequested) return { ...current, status: "cancelled", endedAt, pid: undefined };
@@ -105,12 +127,17 @@ export async function reconcile(id: string): Promise<Job | null> {
       error: { kind: "crashed", message: "The runner stopped without finishing." },
     };
   });
+  if (updated.status === "failed") {
+    writeTerminalResult(updated, "failed", updated.error?.message ?? "The runner stopped without finishing.");
+  } else if (updated.status === "cancelled") {
+    writeTerminalResult(updated, "cancelled", "Cancelled.");
+  }
+  return updated;
 }
 
 export async function pumpQueue(): Promise<void> {
   const { withFileLock } = await import("./store.js");
   const { codehandHome } = await import("./config.js");
-  const path = await import("node:path");
   await withFileLock(path.join(codehandHome(), "queue.lock"), async () => {
     const running = listJobs().filter((job) => job.status === "running").length;
     const slots = runtimeLimits().maxRunning - running;
@@ -162,9 +189,16 @@ async function ensureAgent(): Promise<CodehandError | null> {
 }
 
 export async function startTask(input: StartInput): Promise<Result<StartOutcome>> {
+  if (input.delegate && input.delegate !== "opencode" && input.delegate !== "self") {
+    return err("bad_input", "Delegate must be opencode or self.");
+  }
+  if (input.delegate !== "self") {
+    const invalid = validateTask(input);
+    if (invalid) return err(invalid.kind, invalid.message);
+  }
   if (input.remember) {
     savePreference({
-      delegate: input.delegate ?? "opencode",
+      delegate: input.delegate === "self" ? "self" : "opencode",
       model: input.model,
       savedAt: nowIso(),
     });
@@ -174,13 +208,11 @@ export async function startTask(input: StartInput): Promise<Result<StartOutcome>
     if (!preference) return err("bad_input", "No preference was saved.");
     return ok({ kind: "preference", preference });
   }
-  const invalid = validateTask(input);
-  if (invalid) return err(invalid.kind, invalid.message);
   const agentError = await ensureAgent();
   if (agentError) return err(agentError.kind, agentError.message);
 
-  const auth = await openCodeAdapter.authStatus();
-  const model = input.model ?? (auth.state === "ready" ? undefined : FREE_MODEL);
+  const pref = getPreference();
+  const model = input.model ?? pref?.model ?? FREE_MODEL;
 
   const repo = await resolveRepo(input.repo, input.baseBranch);
   if (!repo.ok) return repo;
@@ -192,9 +224,9 @@ export async function startTask(input: StartInput): Promise<Result<StartOutcome>
     agent: "opencode",
     mode: input.mode ?? "edit",
     model,
-    promptPreview: input.prompt.trim().slice(0, 80),
+    promptPreview: redact(input.prompt.trim().slice(0, 80)),
     checks: input.checks,
-    repo: repo.value,
+    repo: { ...repo.value, input: redact(repo.value.input) },
     workdir: worktreePath(id),
     branch: `codehand/${id}`,
     status: "queued",
@@ -204,7 +236,9 @@ export async function startTask(input: StartInput): Promise<Result<StartOutcome>
     agentVersion: detected.version,
   });
   writeUserPrompt(id, 1, input.prompt);
-  const tree = await createWorktree(repo.value.root, id, `codehand/${id}`, repo.value.baseCommit);
+  const tree = await withRepoLock(repo.value.root, () =>
+    createWorktree(repo.value.root, id, `codehand/${id}`, repo.value.baseCommit),
+  );
   if (!tree.ok) {
     await updateJob(id, (job) => ({ ...job, status: "failed", endedAt: nowIso(), error: tree.error }));
     return tree;
@@ -220,6 +254,10 @@ export async function checkTask(input: {
 }): Promise<Result<TaskView | { kind: "list"; tasks: TaskSummary[] }>> {
   if (!input.taskId) {
     await pumpQueue();
+    const jobs = listJobs();
+    for (const job of jobs) {
+      if (job.status === "running") await reconcile(job.id);
+    }
     const tasks = listJobs()
       .slice(0, 10)
       .map((job) => ({
@@ -241,31 +279,46 @@ export async function replyTask(input: {
   taskId: string;
   message: string;
   waitSeconds?: number;
+  model?: string;
 }): Promise<Result<TaskView>> {
   if (!isJobId(input.taskId)) return err("bad_input", "Unknown task id.");
   const job = readJob(input.taskId);
   if (!job) return err("bad_input", `Unknown task ${input.taskId}.`);
-  if (job.status !== "needs_input" && job.status !== "done") {
-    return err("bad_input", `Cannot reply while the task is ${job.status}.`);
-  }
-  if (!job.sessionId) return err("bad_input", "This task has no OpenCode session to continue.");
   if (!input.message?.trim() || input.message.length > 20_000) {
     return err("bad_input", "Reply must be between 1 and 20000 characters.");
   }
-  const turn = job.turn + 1;
-  writeUserPrompt(job.id, turn, input.message);
-  await updateJob(job.id, (current) => ({
-    ...current,
-    status: "queued",
-    turn,
-    pid: undefined,
-    opencodePid: undefined,
-    endedAt: undefined,
-    startedAt: undefined,
-    heartbeatAt: undefined,
-    error: undefined,
-    promptPreview: input.message.trim().slice(0, 80),
-  }));
+  let rejectedReason: string | undefined;
+  await updateJob(job.id, (current) => {
+    if (current.status !== "needs_input" && current.status !== "done" && current.status !== "failed") {
+      rejectedReason = `Cannot reply while the task is ${current.status}.`;
+      return current;
+    }
+    if (!current.sessionId) {
+      rejectedReason = "This task has no OpenCode session to continue.";
+      return current;
+    }
+    if (current.cleaned || !fs.existsSync(current.workdir)) {
+      rejectedReason = "Cannot reply because this task's worktree was discarded.";
+      return current;
+    }
+    const turn = current.turn + 1;
+    writeUserPrompt(current.id, turn, input.message);
+    return {
+      ...current,
+      status: "queued",
+      turn,
+      pid: undefined,
+      opencodePid: undefined,
+      endedAt: undefined,
+      startedAt: undefined,
+      heartbeatAt: undefined,
+      error: undefined,
+      cancelRequested: undefined,
+      model: input.model ?? current.model,
+      promptPreview: redact(input.message.trim().slice(0, 80)),
+    };
+  });
+  if (rejectedReason) return err("bad_input", rejectedReason);
   await pumpQueue();
   return ok(await waitFor(job.id, clampWait(input.waitSeconds, 20)));
 }
@@ -280,27 +333,47 @@ export async function getOutput(input: {
   if (!isJobId(input.taskId)) return err("bad_input", "Unknown task id.");
   const job = readJob(input.taskId);
   if (!job) return err("bad_input", `Unknown task ${input.taskId}.`);
+  if (input.offset !== undefined && (!Number.isFinite(input.offset) || input.offset < 0)) {
+    return err("bad_input", "offset must be a non-negative number.");
+  }
+  if (input.maxChars !== undefined && (!Number.isFinite(input.maxChars) || input.maxChars < 1)) {
+    return err("bad_input", "maxChars must be a positive number.");
+  }
   const maxChars = Math.min(input.maxChars ?? 8000, 20_000);
   const offset = Math.max(0, input.offset ?? 0);
   let full = "";
   if (input.what === "diff") {
-    const { computeDiff } = await import("./workspace.js");
-    const { atomicWriteText } = await import("./store.js");
-    const { jobDir } = await import("./config.js");
-    const diff = await computeDiff(job.workdir, job.repo.baseCommit, input.path);
-    if (!diff.ok) return diff;
-    full = diff.value.patch;
-    atomicWriteText(`${jobDir(job.id)}/diff.patch`, full);
+    const patchFile = path.join(jobDir(job.id), "diff.patch");
+    if (!input.path && isTerminal(job.status) && fs.existsSync(patchFile)) {
+      full = fs.readFileSync(patchFile, "utf8");
+    } else {
+      readSecrets();
+      const diff = await computeDiff(job.workdir, job.repo.baseCommit, input.path);
+      if (!diff.ok) return diff;
+      full = redact(diff.value.patch);
+      if (!input.path) atomicWriteText(patchFile, full);
+    }
   } else if (input.what === "log") {
     full = readEvents(job.id)
       .map((item) => `${item.ts} ${JSON.stringify(item.event)}`)
       .join("\n");
   } else {
-    const texts = readEvents(job.id).filter((item) => item.event.t === "text");
+    const latest = readEvents(job.id, job.turn);
+    const texts = latest.filter((item) => item.event.t === "text");
     const last = texts.at(-1);
-    full = last && last.event.t === "text" ? last.event.text : (readResult(job.id)?.summary ?? "");
+    if (last && last.event.t === "text") {
+      full = last.event.text;
+    } else if (
+      job.status === "failed" ||
+      (latest.some((item) => item.event.t === "error") && texts.length === 0)
+    ) {
+      full = readResult(job.id)?.summary ?? job.error?.message ?? "";
+    } else {
+      const allTexts = readEvents(job.id).filter((item) => item.event.t === "text");
+      const allLast = allTexts.at(-1);
+      full = allLast && allLast.event.t === "text" ? allLast.event.text : (readResult(job.id)?.summary ?? "");
+    }
   }
-  const { redact } = await import("./redact.js");
   full = redact(full);
   const content = full.slice(offset, offset + maxChars);
   const next = offset + maxChars < full.length ? offset + maxChars : null;

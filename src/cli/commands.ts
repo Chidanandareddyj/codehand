@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import type { LoginMethod } from "../adapters/types.js";
 import { describeAgents } from "../core/agents.js";
 import { finishTask, gc, type FinishAction } from "../core/finish.js";
 import { checkTask, getOutput, replyTask, startTask } from "../core/jobs.js";
@@ -10,9 +11,8 @@ import {
   respondTask,
   type Rendered,
 } from "../core/respond.js";
-import { installSkill } from "../core/skill.js";
 import { apiKeyHelp, checkLogin, installAgent, startLogin } from "../core/setup.js";
-import type { LoginMethod } from "../adapters/types.js";
+import { installSkill } from "../core/skill.js";
 import type { Result } from "../core/types.js";
 
 function emit(rendered: Rendered<unknown>, json: boolean): void {
@@ -27,6 +27,17 @@ function emitResult<T>(
   next: string,
 ): void {
   emit(result.ok ? render(result.value) : respondError(result.error, next), json);
+}
+
+function setupCheckNext(auth: string): string {
+  if (auth === "ready") return "OpenCode is signed in and ready.";
+  if (auth === "env_only") {
+    return "Environment API key(s) detected, but OpenCode is not signed in. Free models are used by default unless you pick a model.";
+  }
+  if (auth === "anonymous") return "Ready on the free tier. Login is optional.";
+  if (auth === "unknown")
+    return "Could not read saved logins. You can still try a free-tier task, or offer login.";
+  return "Continue when you want to start a task.";
 }
 
 export async function runCli(argv = process.argv): Promise<void> {
@@ -94,14 +105,7 @@ export async function runCli(argv = process.argv): Promise<void> {
       emitResult(
         await checkLogin(),
         json,
-        (value) =>
-          respondData(
-            value,
-            `Auth: ${value.auth}`,
-            value.auth === "anonymous"
-              ? "Ready on the free tier. Login is optional."
-              : "Continue when you want to start a task.",
-          ),
+        (value) => respondData(value, `Auth: ${value.auth}`, setupCheckNext(value.auth)),
         "Could not check auth.",
       );
     });
@@ -169,16 +173,24 @@ export async function runCli(argv = process.argv): Promise<void> {
     .command("reply")
     .argument("<taskId>")
     .argument("<message>")
+    .option("--model <model>")
     .option("--wait <seconds>", "20")
     .option("--json")
-    .action(async (taskId: string, message: string, opts: { wait?: string; json?: boolean }) => {
-      emitResult(
-        await replyTask({ taskId, message, waitSeconds: Number(opts.wait) }),
-        Boolean(opts.json),
-        (value) => respondTask(value),
-        "Could not reply.",
-      );
-    });
+    .action(
+      async (taskId: string, message: string, opts: { model?: string; wait?: string; json?: boolean }) => {
+        emitResult(
+          await replyTask({
+            taskId,
+            message,
+            waitSeconds: Number(opts.wait),
+            model: opts.model,
+          }),
+          Boolean(opts.json),
+          (value) => respondTask(value),
+          "Could not reply.",
+        );
+      },
+    );
 
   program
     .command("output")
@@ -191,21 +203,45 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--max-chars <n>", "8000")
     .option("--json")
     .action(async (taskId: string, opts) => {
+      const json = Boolean(opts.json);
+      const offset = Number(opts.offset);
+      const maxChars = Number(opts.maxChars);
+      if (!Number.isFinite(offset) || offset < 0) {
+        emit(
+          respondError(
+            { kind: "bad_input", message: "offset must be a non-negative number" },
+            "Pass a non-negative --offset.",
+          ),
+          json,
+        );
+        return;
+      }
+      if (!Number.isFinite(maxChars) || maxChars < 1) {
+        emit(
+          respondError(
+            { kind: "bad_input", message: "max-chars must be a positive number" },
+            "Pass a positive --max-chars.",
+          ),
+          json,
+        );
+        return;
+      }
       const what = opts.log ? "log" : opts.message ? "message" : "diff";
       emitResult(
         await getOutput({
           taskId,
           what,
           path: opts.path,
-          offset: Number(opts.offset),
-          maxChars: Number(opts.maxChars),
+          offset,
+          maxChars,
         }),
-        Boolean(opts.json),
+        json,
         (value) =>
           respondData(
             value,
             value.content,
             value.nextOffset === null ? "End of output." : "Pass --offset to continue.",
+            { unclipped: true },
           ),
         "Could not read output.",
       );
@@ -245,10 +281,22 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option("--days <days>", "7")
     .option("--json")
     .action(async (opts: { days?: string; json?: boolean }) => {
-      const removed = await gc(Number(opts.days));
+      const json = Boolean(opts.json);
+      const days = Number(opts.days);
+      if (!Number.isFinite(days) || days <= 0) {
+        emit(
+          respondError(
+            { kind: "bad_input", message: "days must be a positive number" },
+            "Pass a positive --days value.",
+          ),
+          json,
+        );
+        return;
+      }
+      const removed = await gc(days);
       emit(
         respondData(removed, `Removed ${removed.removed.length} old task(s).`, "Nothing else to clean."),
-        Boolean(opts.json),
+        json,
       );
     });
 

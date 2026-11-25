@@ -6,6 +6,7 @@ export type ErrorKind =
   | "auth"
   | "rate_limit"
   | "quota"
+  | "model_unavailable"
   | "network"
   | "timeout"
   | "idle_timeout"
@@ -14,6 +15,10 @@ export type ErrorKind =
   | "not_installed"
   | "git"
   | "unknown";
+
+export type AuthState = "ready" | "env_only" | "anonymous" | "unknown";
+
+export type WorktreeState = "uncommitted" | "committed" | "clean";
 
 export interface CodehandError {
   kind: ErrorKind;
@@ -102,12 +107,15 @@ export interface TaskResult {
   status: "done" | "needs_input" | "failed" | "cancelled";
   summary: string;
   question?: string;
+  warning?: string;
   filesChanged: FileChange[];
   checks?: CheckResult[];
   blockedActions: string[];
   usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
   durationS: number;
   branch: string;
+  workdir?: string;
+  worktreeState?: WorktreeState;
   task_id?: string;
 }
 
@@ -135,7 +143,7 @@ const transitions: Record<JobStatus, JobStatus[]> = {
   running: ["needs_input", "done", "failed", "cancelled"],
   needs_input: ["queued", "cancelled"],
   done: ["queued"],
-  failed: [],
+  failed: ["queued"],
   cancelled: [],
 };
 

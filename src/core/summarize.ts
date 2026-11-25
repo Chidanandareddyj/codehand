@@ -1,4 +1,4 @@
-import type { CheckResult, FileChange, StoredEvent, TaskResult } from "./types.js";
+import type { CheckResult, FileChange, StoredEvent, TaskResult, WorktreeState } from "./types.js";
 
 export function buildResult(input: {
   events: StoredEvent[];
@@ -9,19 +9,30 @@ export function buildResult(input: {
   endedAt: string;
   status: TaskResult["status"];
   fallbackSummary?: string;
+  warning?: string;
+  workdir?: string;
+  worktreeState?: WorktreeState;
 }): TaskResult {
   const texts = input.events
     .filter((item) => item.event.t === "text")
     .map((item) => (item.event.t === "text" ? item.event.text : ""));
   const lastText = texts.at(-1) ?? "";
   const questionMatch = lastText.match(/^NEEDS_INPUT:\s*(.+)$/m);
-  let summary = input.fallbackSummary ?? "";
   const summaryAt = lastText.indexOf("SUMMARY:");
-  if (summaryAt >= 0) {
+  let summary = input.fallbackSummary ?? "";
+  if (input.status === "failed" && input.fallbackSummary) {
+    summary = input.fallbackSummary;
+  } else if (summaryAt >= 0) {
     summary = lastText
       .slice(summaryAt + "SUMMARY:".length)
       .replace(/^NEEDS_INPUT:.*$/gm, "")
       .trim();
+  } else if (input.warning) {
+    const names = input.files
+      .slice(0, 5)
+      .map((file) => file.path)
+      .join(", ");
+    summary = `Edited ${input.files.length} file(s) before hitting a provider limit (${names}).`;
   } else if (lastText.trim()) {
     summary = lastText.trim();
   }
@@ -64,12 +75,15 @@ export function buildResult(input: {
         : input.status,
     summary: summary || input.fallbackSummary || "OpenCode finished without a summary.",
     question: questionMatch?.[1]?.trim(),
+    warning: input.warning,
     filesChanged: input.files,
     checks: input.checks,
     blockedActions: blocked.slice(0, 5),
     usage: sawUsage ? { inputTokens, outputTokens, costUsd } : undefined,
     durationS,
     branch: input.branch,
+    workdir: input.workdir,
+    worktreeState: input.worktreeState,
   };
 }
 

@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { jobDir, jobsDir, nowIso } from "./config.js";
+import { isAlive } from "./proc.js";
 import { appendLine, atomicWriteJson, readJson, withFileLock } from "./store.js";
 import { canTransition, type Job, type StoredEvent, type TaskResult } from "./types.js";
+
+const RUNNER_LOCK_ANCIENT_MS = 5 * 60_000;
 
 export function readJob(id: string): Job | null {
   return readJson<Job>(path.join(jobDir(id), "job.json"));
@@ -75,7 +78,7 @@ export function readEvents(id: string, turn?: number): StoredEvent[] {
   const turns = turn
     ? [turn]
     : fs.existsSync(path.join(jobDir(id), "turns"))
-      ? fs.readdirSync(path.join(jobDir(id), "turns"))
+      ? fs.readdirSync(path.join(jobDir(id), "turns")).sort((a, b) => Number(a) - Number(b))
       : [];
   const events: StoredEvent[] = [];
   for (const item of turns) {
@@ -103,31 +106,38 @@ export function readResult(id: string): TaskResult | null {
 
 export function acquireRunnerLock(id: string): boolean {
   const lock = path.join(jobDir(id), "lock");
+  const token = `${process.pid}:${Date.now()}`;
   try {
-    fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
+    fs.writeFileSync(lock, token, { flag: "wx" });
     return true;
   } catch {
-    let owner = 0;
+    let contents = "";
     try {
-      owner = Number(fs.readFileSync(lock, "utf8"));
+      contents = fs.readFileSync(lock, "utf8");
     } catch {
-      owner = 0;
-    }
-    try {
-      process.kill(owner, 0);
       return false;
+    }
+    const [pidPart, atPart] = contents.split(":");
+    const owner = Number(pidPart);
+    const at = Number(atPart);
+    const age = Number.isFinite(at) && at > 0 ? Date.now() - at : Number.POSITIVE_INFINITY;
+    if (isAlive(owner) && age <= RUNNER_LOCK_ANCIENT_MS) return false;
+    fs.rmSync(lock, { force: true });
+    try {
+      fs.writeFileSync(lock, token, { flag: "wx" });
+      return true;
     } catch {
-      fs.rmSync(lock, { force: true });
-      try {
-        fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
-        return true;
-      } catch {
-        return false;
-      }
+      return false;
     }
   }
 }
 
 export function releaseRunnerLock(id: string): void {
-  fs.rmSync(path.join(jobDir(id), "lock"), { force: true });
+  const lock = path.join(jobDir(id), "lock");
+  try {
+    const owner = Number(fs.readFileSync(lock, "utf8").split(":")[0]);
+    if (owner === process.pid) fs.rmSync(lock, { force: true });
+  } catch {
+    /* already gone */
+  }
 }
