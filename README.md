@@ -72,6 +72,8 @@ Run `npx -y codehand install-skill` in this project, then follow CODEHAND.md for
 
 ## Commands
 
+npm’s site shows `npm i codehand`. That only *installs* the package. An MCP bot needs a command that *runs* it, so the prompt uses `npx -y codehand` (downloads if needed, then starts the server). `npm i -g codehand` is optional; after that the command can be just `codehand`.
+
 ```text
 npx -y codehand
 npx -y codehand agents --json
